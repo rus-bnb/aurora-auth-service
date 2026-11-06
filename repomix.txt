@@ -1,0 +1,2272 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  db/
+    Database.js
+    Repository.js
+    schema.js
+  repos/
+    PasswordResetRepository.js
+    SessionRepository.js
+    UserRepository.js
+    VerificationRepository.js
+  services/
+    AuthService.js
+    EmailService.js
+    errors.js
+  ui/
+    AuthForm.js
+    ForgotPasswordView.js
+    icons.js
+    pages.js
+    ProfileView.js
+    ResetPasswordView.js
+    VerifyEmailView.js
+    WelcomeView.js
+  utils/
+    id.js
+    password.js
+    validation.js
+  main.js
+styles/
+  main.css
+tests/
+  services/
+    AuthService.test.js
+index.html
+package.json
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/db/Database.js">
+const requestToPromise = (req) =>
+    new Promise((resolve, reject) => {
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+
+export class Database {
+    #name;
+    #version;
+    #schema;
+    #db = null;
+    #openPromise = null;
+
+    constructor({ name, schema }) {
+        if (!name) throw new Error('Database name is required');
+        if (!schema?.stores) throw new Error('Schema with stores is required');
+        this.#name = name;
+        this.#schema = schema;
+        this.#version = schema.version ?? 1;
+    }
+
+    get isOpen() {
+        return this.#db !== null;
+    }
+
+    async open() {
+        if (this.#db) return this.#db;
+        if (this.#openPromise) return this.#openPromise;
+
+        this.#openPromise = new Promise((resolve, reject) => {
+            const request = indexedDB.open(this.#name, this.#version);
+
+            request.onupgradeneeded = (event) => {
+                this.#applySchema(request.result, request.transaction, event.oldVersion);
+            };
+
+            request.onsuccess = () => {
+                this.#db = request.result;
+                this.#db.onversionchange = () => {
+                    this.#db?.close();
+                    this.#db = null;
+                };
+                resolve(this.#db);
+            };
+
+            request.onerror = () => reject(request.error);
+            request.onblocked = () =>
+                reject(new Error('Database upgrade blocked by another connection'));
+        }).finally(() => {
+            this.#openPromise = null;
+        });
+
+        return this.#openPromise;
+    }
+
+    close() {
+        this.#db?.close();
+        this.#db = null;
+    }
+
+    async transaction(storeNames, mode, executor) {
+        const db = await this.open();
+        const names = Array.isArray(storeNames) ? storeNames : [storeNames];
+
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(names, mode);
+            let execResult;
+            let execError;
+
+            tx.oncomplete = () => (execError ? reject(execError) : resolve(execResult));
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () =>
+                reject(execError ?? tx.error ?? new Error('Transaction aborted'));
+
+            try {
+                execResult = executor(tx);
+                if (execResult && typeof execResult.then === 'function') {
+                    execResult.catch((e) => {
+                        execError = e;
+                        try { tx.abort(); } catch { /* already aborted */ }
+                    });
+                }
+            } catch (e) {
+                execError = e;
+                try { tx.abort(); } catch { /* already aborted */ }
+            }
+        });
+    }
+
+    #run(storeName, mode, fn) {
+        return this.transaction(storeName, mode, (tx) =>
+            fn(tx.objectStore(storeName)),
+        );
+    }
+
+    get(storeName, key) { return this.#run(storeName, 'readonly', (s) => requestToPromise(s.get(key))); }
+    getAll(storeName, q, n) { return this.#run(storeName, 'readonly', (s) => requestToPromise(s.getAll(q, n))); }
+    getByIndex(storeName, i, v) { return this.#run(storeName, 'readonly', (s) => requestToPromise(s.index(i).get(v))); }
+    getAllByIndex(storeName, i, v) { return this.#run(storeName, 'readonly', (s) => requestToPromise(s.index(i).getAll(v))); }
+    add(storeName, v) { return this.#run(storeName, 'readwrite', (s) => requestToPromise(s.add(v))); }
+    put(storeName, v) { return this.#run(storeName, 'readwrite', (s) => requestToPromise(s.put(v))); }
+    delete(storeName, key) { return this.#run(storeName, 'readwrite', (s) => requestToPromise(s.delete(key))); }
+    count(storeName, q) { return this.#run(storeName, 'readonly', (s) => requestToPromise(s.count(q))); }
+    clear(storeName) { return this.#run(storeName, 'readwrite', (s) => requestToPromise(s.clear())); }
+
+    #applySchema(db, tx, _oldVersion) {
+        for (const [storeName, def] of Object.entries(this.#schema.stores)) {
+            let store;
+            if (!db.objectStoreNames.contains(storeName)) {
+                store = db.createObjectStore(storeName, {
+                    keyPath: def.keyPath,
+                    autoIncrement: def.autoIncrement ?? false,
+                });
+            } else {
+                store = tx.objectStore(storeName);
+            }
+            for (const [indexName, idxDef] of Object.entries(def.indexes ?? {})) {
+                if (!store.indexNames.contains(indexName)) {
+                    store.createIndex(indexName, idxDef.keyPath, {
+                        unique: idxDef.unique ?? false,
+                        multiEntry: idxDef.multiEntry ?? false,
+                    });
+                }
+            }
+        }
+    }
+}
+</file>
+
+<file path="src/db/Repository.js">
+export class Repository {
+  #db;
+  #storeName;
+
+  constructor(db, storeName) {
+    this.#db = db;
+    this.#storeName = storeName;
+  }
+
+  findById(key) { return this.#db.get(this.#storeName, key); }
+  findAll() { return this.#db.getAll(this.#storeName); }
+  findOneByIndex(idx, value) { return this.#db.getByIndex(this.#storeName, idx, value); }
+  findAllByIndex(idx, value) { return this.#db.getAllByIndex(this.#storeName, idx, value); }
+  add(entity) { return this.#db.add(this.#storeName, entity); }
+  save(entity) { return this.#db.put(this.#storeName, entity); }
+  remove(key) { return this.#db.delete(this.#storeName, key); }
+  count(query) { return this.#db.count(this.#storeName, query); }
+  clear() { return this.#db.clear(this.#storeName); }
+}
+</file>
+
+<file path="src/db/schema.js">
+export const schema = {
+    version: 2,                     // ← bump: добавлены новые stores
+    stores: {
+        users: {
+            keyPath: 'id',
+            autoIncrement: false,
+            indexes: {
+                byEmail: { keyPath: 'email', unique: true },
+            },
+        },
+        sessions: {
+            keyPath: 'userId',
+            autoIncrement: false,
+            indexes: {
+                byCreatedAt: { keyPath: 'createdAt' },
+            },
+        },
+        verifications: {
+            keyPath: 'token',
+            autoIncrement: false,
+            indexes: {
+                byUserId: { keyPath: 'userId' },
+                byExpiresAt: { keyPath: 'expiresAt' },
+            },
+        },
+        passwordResets: {
+            keyPath: 'token',
+            autoIncrement: false,
+            indexes: {
+                byUserId: { keyPath: 'userId' },
+                byExpiresAt: { keyPath: 'expiresAt' },
+            },
+        },
+    },
+};
+</file>
+
+<file path="src/repos/PasswordResetRepository.js">
+import { Repository } from '../db/Repository.js';
+
+export class PasswordResetRepository extends Repository {
+    constructor(db) { super(db, 'passwordResets'); }
+
+    findByUser(userId) {
+        return this.findOneByIndex('byUserId', userId);
+    }
+}
+</file>
+
+<file path="src/repos/SessionRepository.js">
+import { Repository } from '../db/Repository.js';
+
+export class SessionRepository extends Repository {
+  constructor(db) { super(db, 'sessions'); }
+}
+</file>
+
+<file path="src/repos/UserRepository.js">
+import { Repository } from '../db/Repository.js';
+
+export class UserRepository extends Repository {
+    constructor(db) { super(db, 'users'); }
+    findByEmail(email) { return this.findOneByIndex('byEmail', email.toLowerCase()); }
+}
+</file>
+
+<file path="src/repos/VerificationRepository.js">
+import { Repository } from '../db/Repository.js';
+
+export class VerificationRepository extends Repository {
+    constructor(db) { super(db, 'verifications'); }
+
+    findByUser(userId) {
+        return this.findOneByIndex('byUserId', userId);
+    }
+
+    async deleteExpired(now = Date.now()) {
+        const all = await this.findAll();
+        const expired = all.filter((v) => v.expiresAt < now);
+        await Promise.all(expired.map((v) => this.remove(v.token)));
+    }
+}
+</file>
+
+<file path="src/services/AuthService.js">
+import { hashPassword, verifyPassword } from '../utils/password.js';
+import { uuid } from '../utils/id.js';
+import { AuthError } from './errors.js';
+import { EmailService } from './EmailService.js';
+
+const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+import { EmailService } from './EmailService.js';
+
+const TOKEN_TTL = 24 * 60 * 60 * 1000; // 24 часа
+
+export class AuthService {
+    #userRepo;
+    #sessionRepo;
+    #verificationRepo;
+    #passwordResetRepo;
+    #emailService;
+    #currentUser = null;
+
+    constructor({ userRepo, sessionRepo, verificationRepo, passwordResetRepo, emailService }) {
+        this.#userRepo = userRepo;
+        this.#sessionRepo = sessionRepo;
+        this.#verificationRepo = verificationRepo;
+        this.#passwordResetRepo = passwordResetRepo;
+        this.#emailService = emailService;
+    }
+
+    async register({ name, email, password }) {
+        if (!email || !password) throw new AuthError('Заполните все поля');
+
+        const exists = await this.#userRepo.findByEmail(email);
+        if (exists) throw new AuthError('Аккаунт с таким email уже существует');
+
+        const user = {
+            id: uuid(),
+            name: name?.trim() || email,
+            email: email.toLowerCase(),
+            passwordHash: await hashPassword(password),
+            emailVerified: false,
+            createdAt: Date.now(),
+        };
+
+        await this.#userRepo.add(user);
+        await this.#sendVerification(user);
+        await this.#sessionRepo.save({ userId: user.id, createdAt: Date.now(), expiresAt: Date.now() + THIRTY_DAYS });
+        this.#currentUser = this.#publicView(user);
+        return this.#currentUser;
+    }
+
+    async #sendVerification(user) {
+        await this.#verificationRepo.deleteByUser?.(user.id); // если добавим метод
+        const token = uuid();
+        await this.#verificationRepo.add({
+            token,
+            userId: user.id,
+            expiresAt: Date.now() + TOKEN_TTL,
+        });
+        const link = `${location.origin}${location.pathname}#/verify?token=${token}`;
+        await this.#emailService.sendVerification(user.email, link);
+    }
+
+    async verifyEmail(token) {
+        const record = await this.#verificationRepo.findById(token);
+        if (!record) throw new AuthError('Ссылка недействительна или истекла');
+        if (record.expiresAt < Date.now()) {
+            await this.#verificationRepo.remove(token);
+            throw new AuthError('Ссылка истекла');
+        }
+
+        const user = await this.#userRepo.findById(record.userId);
+        if (!user) throw new AuthError('Пользователь не найден');
+
+        user.emailVerified = true;
+        await this.#userRepo.save(user);
+        await this.#verificationRepo.remove(token);
+
+        if (this.#currentUser?.id === user.id) {
+            this.#currentUser = this.#publicView(user);
+        }
+        return this.#currentUser;
+    }
+
+    async resendVerification() {
+        if (!this.#currentUser) throw new AuthError('Требуется вход');
+        const user = await this.#userRepo.findById(this.#currentUser.id);
+        if (!user) throw new AuthError('Пользователь не найден');
+        if (user.emailVerified) throw new AuthError('Email уже подтверждён');
+        await this.#sendVerification(user);
+    }
+
+    async requestPasswordReset(email) {
+        const user = await this.#userRepo.findByEmail(email);
+        if (!user) throw new AuthError('Если аккаунт существует, письмо отправлено');
+        if (!user.emailVerified) {
+            throw new AuthError('Сначала подтвердите email — восстановление пароля недоступно');
+        }
+
+        const token = uuid();
+        await this.#passwordResetRepo.add({
+            token,
+            userId: user.id,
+            expiresAt: Date.now() + TOKEN_TTL,
+        });
+        const link = `${location.origin}${location.pathname}#/reset-password?token=${token}`;
+        await this.#emailService.sendPasswordReset(user.email, link);
+    }
+
+    async resetPassword(token, newPassword) {
+        const record = await this.#passwordResetRepo.findById(token);
+        if (!record) throw new AuthError('Ссылка недействительна или истекла');
+        if (record.expiresAt < Date.now()) {
+            await this.#passwordResetRepo.remove(token);
+            throw new AuthError('Ссылка истекла');
+        }
+
+        const user = await this.#userRepo.findById(record.userId);
+        if (!user) throw new AuthError('Пользователь не найден');
+
+        user.passwordHash = await hashPassword(newPassword);
+        await this.#userRepo.save(user);
+        await this.#passwordResetRepo.remove(token);
+        await this.#sessionRepo.remove(user.id); // разлогинить везде
+    }
+
+    async updateProfile(userId, { name, email }) {
+        const user = await this.#userRepo.findById(userId);
+        if (!user) throw new AuthError('Пользователь не найден');
+
+        const nextEmail = email ? email.toLowerCase() : user.email;
+        if (nextEmail !== user.email) {
+            const exists = await this.#userRepo.findByEmail(nextEmail);
+            if (exists) throw new AuthError('Этот email уже занят');
+            user.email = nextEmail;
+            user.emailVerified = false;
+        }
+        if (name != null) user.name = name.trim() || user.name;
+
+        await this.#userRepo.save(user);
+
+        if (!user.emailVerified) {
+            await this.#sendVerification(user);
+        }
+
+        if (this.#currentUser?.id === user.id) {
+            this.#currentUser = this.#publicView(user);
+        }
+        return this.#currentUser;
+    }
+
+    #publicView({ passwordHash, ...safe }) { return safe; }
+}
+</file>
+
+<file path="src/services/EmailService.js">
+const EMAILJS_SERVICE_ID  = 'YOUR_SERVICE_ID';
+const EMAILJS_PUBLIC_KEY  = 'YOUR_PUBLIC_KEY';
+const TEMPLATE_VERIFY     = 'template_verify';
+const TEMPLATE_RESET      = 'template_reset';
+
+export class EmailService {
+    #ready = false;
+
+    #ensureReady() {
+        if (this.#ready) return;
+        if (!window.emailjs) throw new Error('EmailJS SDK не загружен');
+        emailjs.init(EMAILJS_PUBLIC_KEY);
+        this.#ready = true;
+    }
+
+    async sendVerification(email, link) {
+        this.#ensureReady();
+        return emailjs.send(EMAILJS_SERVICE_ID, TEMPLATE_VERIFY, {
+            to_email: email,
+            verification_link: link,
+        });
+    }
+
+    async sendPasswordReset(email, link) {
+        this.#ensureReady();
+        return emailjs.send(EMAILJS_SERVICE_ID, TEMPLATE_RESET, {
+            to_email: email,
+            reset_link: link,
+        });
+    }
+}
+</file>
+
+<file path="src/services/errors.js">
+export class AuthError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'AuthError';
+    }
+}
+</file>
+
+<file path="src/ui/AuthForm.js">
+import { ICONS } from './icons.js';
+import { validateField, EMAIL_RE } from '../utils/validation.js';
+
+const STRENGTH_LABELS = ['', 'Слабый', 'Средний', 'Хороший', 'Надёжный'];
+
+export class AuthForm extends HTMLElement {
+    #schema = null;
+    #rendered = false;
+    #loading = false;
+
+    set schema(value) {
+        this.#schema = value;
+        this.#render();
+    }
+    get schema() { return this.#schema; }
+
+    connectedCallback() {
+        if (this.#schema && !this.#rendered) this.#render();
+    }
+
+    #render() {
+        if (!this.#schema) return;
+        const s = this.#schema;
+        this.#rendered = true;
+
+        this.innerHTML = `
+      <header class="head">
+        ${s.eyebrow ? `<span class="eyebrow">${s.eyebrow}</span>` : ''}
+        <h1>${s.title}</h1>
+        <p>${s.subtitle}</p>
+      </header>
+
+      <form class="form" novalidate autocomplete="on">
+        ${s.fields.map((f) => this.#renderField(f)).join('')}
+        <p class="form-error" data-form-error role="alert"></p>
+        <button class="submit" type="submit">
+          <span class="spinner" aria-hidden="true"></span>
+          <span class="submit-label">${s.submit}</span>
+        </button>
+        <p class="note" data-note role="status"></p>
+        ${s.footer
+                ? `<p class="foot">${s.footer.text}
+               <a href="#/${s.footer.to}" data-nav="${s.footer.to}">${s.footer.linkText}</a>
+             </p>`
+                : ''}
+      </form>
+    `;
+
+        this.#bind();
+    }
+
+    /* ------------------------------------------------------------------
+     * Рендер одного поля. Раньше жил в pages.js, но нужен только здесь —
+     * поэтому приватный метод, а не shared-утилита.
+     * ---------------------------------------------------------------- */
+    #renderField(field) {
+        const id = `f-${field.name}`;
+        const errId = `e-${field.name}`;
+
+        if (field.type === 'checkbox') {
+            return `
+        <div class="field field--check" data-field="${field.name}">
+          <label class="checkbox" for="${id}">
+            <input type="checkbox" id="${id}" name="${field.name}" aria-describedby="${errId}" />
+            <span class="box" aria-hidden="true">${ICONS.check}</span>
+            <span>${field.label}</span>
+          </label>
+          <p class="error" id="${errId}" data-error></p>
+        </div>`;
+        }
+
+        const isPassword = field.type === 'password';
+
+        return `
+      <div class="field" data-field="${field.name}">
+        <div class="field-head">
+          <label for="${id}">${field.label}</label>
+          ${field.action
+                ? `<button type="button" class="mini-link" data-action="${field.action.action}">
+                 ${field.action.label}
+               </button>`
+                : ''}
+        </div>
+        <div class="control${field.icon ? ' has-icon' : ''}">
+          ${field.icon ? `<span class="icon">${ICONS[field.icon]}</span>` : ''}
+          <input
+            id="${id}" name="${field.name}" type="${field.type}"
+            placeholder="${field.placeholder || ''}"
+            autocomplete="${field.autocomplete || 'off'}"
+            ${field.inputmode ? `inputmode="${field.inputmode}"` : ''}
+            aria-describedby="${errId}"
+          />
+          ${isPassword
+                ? `<button type="button" class="toggle" data-toggle
+                       aria-label="Показать пароль" aria-pressed="false">
+                 ${ICONS.eye}
+               </button>`
+                : ''}
+        </div>
+        ${field.strength
+                ? `<div class="strength" data-strength data-level="0" aria-hidden="true">
+               <i></i><i></i><i></i><i></i>
+             </div>
+             <p class="strength-label" data-strength-label aria-live="polite"></p>`
+                : ''}
+        <p class="error" id="${errId}" data-error></p>
+      </div>`;
+    }
+
+    #bind() {
+        const form = this.querySelector('form');
+        form.addEventListener('submit', (e) => this.#onSubmit(e));
+        form.addEventListener('input', (e) => this.#onInput(e));
+        form.addEventListener('focusout', (e) => this.#onBlur(e));
+
+        this.querySelectorAll('[data-toggle]').forEach((btn) =>
+            btn.addEventListener('click', () => this.#togglePassword(btn)));
+
+        this.querySelectorAll('[data-nav]').forEach((link) =>
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                this.dispatchEvent(new CustomEvent('navigate', {
+                    detail: { to: link.dataset.nav },
+                    bubbles: true, composed: true,
+                }));
+            }));
+
+        this.querySelectorAll('[data-action]').forEach((btn) =>
+            btn.addEventListener('click', () => this.#runAction(btn.dataset.action)));
+    }
+
+    #values() {
+        const out = {};
+        this.querySelectorAll('input[name]').forEach((input) => {
+            out[input.name] = input.type === 'checkbox' ? input.checked : input.value;
+        });
+        return out;
+    }
+
+    #fieldOf(input) { return input.closest('.field'); }
+    #fieldSchema(name) { return this.#schema.fields.find((f) => f.name === name); }
+
+    #setError(wrap, message) {
+        if (!wrap) return;
+        const errEl = wrap.querySelector('[data-error]');
+        const input = wrap.querySelector('input');
+        if (message) {
+            wrap.classList.add('is-invalid');
+            if (errEl) errEl.textContent = message;
+            if (input) input.setAttribute('aria-invalid', 'true');
+        } else {
+            wrap.classList.remove('is-invalid');
+            if (errEl) errEl.textContent = '';
+            if (input) input.removeAttribute('aria-invalid');
+        }
+    }
+
+    #formError(message = '') {
+        const el = this.querySelector('[data-form-error]');
+        if (!el) return;
+        el.textContent = message;
+        el.classList.toggle('show', Boolean(message));
+    }
+
+    #setNote(message = '') {
+        const el = this.querySelector('[data-note]');
+        if (!el) return;
+        el.textContent = message;
+        el.classList.toggle('show', Boolean(message));
+    }
+
+    #setLoading(on) {
+        this.#loading = on;
+        const btn = this.querySelector('.submit');
+        if (!btn) return;
+        btn.disabled = on;
+        btn.classList.toggle('is-loading', on);
+    }
+
+    #togglePassword(btn) {
+        const input = btn.parentElement.querySelector('input');
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        btn.innerHTML = show ? ICONS.eyeOff : ICONS.eye;
+        btn.setAttribute('aria-pressed', String(show));
+        btn.setAttribute('aria-label', show ? 'Скрыть пароль' : 'Показать пароль');
+        input.focus({ preventScroll: true });
+    }
+
+    #onInput(e) {
+        const input = e.target;
+        if (!(input instanceof HTMLInputElement)) return;
+        const wrap = this.#fieldOf(input);
+        const field = this.#fieldSchema(input.name);
+        if (!wrap || !field) return;
+
+        if (wrap.classList.contains('is-invalid')) {
+            const value = input.type === 'checkbox' ? input.checked : input.value;
+            this.#setError(wrap, validateField(field, value, this.#values()));
+        }
+
+        if (field.strength) this.#updateStrength(wrap, input.value);
+
+        if (input.name === 'password') {
+            const confirmWrap = this.querySelector('[data-field="passwordConfirm"]');
+            const confirmField = this.#fieldSchema('passwordConfirm');
+            if (confirmWrap?.classList.contains('is-invalid') && confirmField) {
+                const values = this.#values();
+                this.#setError(confirmWrap, validateField(confirmField, values.passwordConfirm, values));
+            }
+        }
+
+        this.#formError('');
+    }
+
+    #onBlur(e) {
+        const input = e.target;
+        if (!(input instanceof HTMLInputElement)) return;
+        const wrap = this.#fieldOf(input);
+        const field = this.#fieldSchema(input.name);
+        if (!wrap || !field) return;
+
+        const value = input.type === 'checkbox' ? input.checked : input.value;
+        if (!String(value).trim() && !wrap.classList.contains('is-invalid')) return;
+
+        this.#setError(wrap, validateField(field, value, this.#values()));
+    }
+
+    #updateStrength(wrap, value) {
+        const meter = wrap.querySelector('[data-strength]');
+        const label = wrap.querySelector('[data-strength-label]');
+        if (!meter) return;
+
+        let score = 0;
+        if (value.length >= 8) score++;
+        if (value.length >= 12) score++;
+        if (/[A-ZА-ЯЁ]/.test(value) && /[a-zа-яё]/.test(value)) score++;
+        if (/\d/.test(value)) score++;
+        if (/[^\p{L}\p{N}\s]/u.test(value)) score++;
+        score = Math.min(score, 4);
+        if (!value) score = 0;
+
+        meter.dataset.level = String(score);
+        if (label) label.textContent = value ? STRENGTH_LABELS[score] : '';
+    }
+
+    #runAction(action) {
+        if (action === 'forgot') {
+            const emailInput = this.querySelector('input[name="email"]');
+            const email = emailInput?.value.trim() ?? '';
+
+            if (!EMAIL_RE.test(email)) {
+                this.#formError('Укажите email');
+                emailInput?.focus();
+                return;
+            }
+
+            this.#formError('');
+            this.#setNote('Локальная демо-версия не поддерживает восстановление пароля.');
+        }
+    }
+
+    async #onSubmit(e) {
+        e.preventDefault();
+        if (this.#loading) return;
+
+        this.#formError('');
+        this.#setNote('');
+
+        const values = this.#values();
+        let firstInvalid = null;
+
+        for (const field of this.#schema.fields) {
+            const wrap = this.querySelector(`[data-field="${field.name}"]`);
+            if (!wrap) continue;
+            const error = validateField(field, values[field.name], values);
+            this.#setError(wrap, error);
+            if (error && !firstInvalid) firstInvalid = wrap.querySelector('input');
+        }
+
+        if (firstInvalid) {
+            firstInvalid.focus();
+            this.#formError('Проверьте выделенные поля');
+            return;
+        }
+
+        this.#setLoading(true);
+        try {
+            const user = await this.#schema.onSubmit(values);
+            this.#setNote(this.#schema.successText || 'Готово!');
+            this.dispatchEvent(new CustomEvent('auth:success', {
+                detail: { user },
+                bubbles: true,
+                composed: true,
+            }));
+        } catch (err) {
+            this.#formError(err?.message || 'Не удалось выполнить запрос');
+        } finally {
+            this.#setLoading(false);
+        }
+    }
+}
+
+customElements.define('auth-form', AuthForm);
+</file>
+
+<file path="src/ui/ForgotPasswordView.js">
+export class ForgotPasswordView extends HTMLElement {
+    #auth = null;
+    set auth(value) { this.#auth = value; this.#render(); }
+
+    #render() {
+        this.innerHTML = `
+          <header class="head">
+            <span class="eyebrow">Восстановление</span>
+            <h1>Сброс пароля</h1>
+            <p>Введите email, указанный при регистрации.</p>
+          </header>
+          <form class="form">
+            <div class="field">
+              <label>Email</label>
+              <div class="control"><input name="email" type="email" required /></div>
+            </div>
+            <p class="form-error" data-error></p>
+            <button class="submit" type="submit">Отправить ссылку</button>
+            <p class="foot"><a href="#/login" data-nav>Назад ко входу</a></p>
+          </form>
+        `;
+
+        this.querySelector('form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = new FormData(e.target).get('email');
+            try {
+                await this.#auth.requestPasswordReset(email);
+                this.querySelector('[data-error]').textContent =
+                    'Если аккаунт существует и подтверждён, письмо отправлено.';
+                this.querySelector('[data-error]').classList.add('note');
+            } catch (err) {
+                this.querySelector('[data-error]').textContent = err.message;
+            }
+        });
+    }
+}
+customElements.define('forgot-password-view', ForgotPasswordView);
+</file>
+
+<file path="src/ui/icons.js">
+const icon = (paths) =>
+    `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+
+export const ICONS = {
+    mail: icon(`<rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/>
+              <path d="M3 7l9 6 9-6"/>`),
+    lock: icon(`<rect x="3.5" y="10.5" width="17" height="10.5" rx="2.5"/>
+              <path d="M7.5 10.5V7.5a4.5 4.5 0 0 1 9 0v3"/>`),
+    user: icon(`<path d="M20 21v-1.8a4.2 4.2 0 0 0-4.2-4.2H8.2A4.2 4.2 0 0 0 4 19.2V21"/>
+              <circle cx="12" cy="7.6" r="3.9"/>`),
+    eye: icon(`<path d="M1.8 12S5.6 5 12 5s10.2 7 10.2 7-3.8 7-10.2 7S1.8 12 1.8 12z"/>
+             <circle cx="12" cy="12" r="3.1"/>`),
+    eyeOff: icon(`<path d="M17.9 17.9A10.4 10.4 0 0 1 12 19.8C5.6 19.8 1.8 12 1.8 12
+                          a19 19 0 0 1 5.2-6.1M9.9 4.3A10 10 0 0 1 12 4.2c6.4 0 10.2 7.8 10.2 7.8
+                          a19.2 19.2 0 0 1-2.2 3.3M14.1 14.1a3.1 3.1 0 1 1-4.2-4.2"/>
+             <path d="M2 2l20 20"/>`),
+    check: `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="#0a0e1a"
+               stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 6L9 17l-5-5"/></svg>`,
+};
+</file>
+
+<file path="src/ui/pages.js">
+export function buildPages(auth) {
+    return {
+        login: {
+            eyebrow: 'Вход в аккаунт',
+            title: 'С возвращением',
+            subtitle: 'Войдите, чтобы продолжить работу с Aurora.',
+            submit: 'Войти',
+            successText: 'Вход выполнен!',
+            fields: [
+                {
+                    name: 'email', type: 'email', label: 'Email',
+                    placeholder: 'you@example.com', autocomplete: 'email',
+                    icon: 'mail', inputmode: 'email',
+                    rules: { required: 'Введите email', email: true },
+                },
+                {
+                    name: 'password', type: 'password', label: 'Пароль',
+                    placeholder: 'Введите пароль', autocomplete: 'current-password',
+                    icon: 'lock',
+                    rules: { required: 'Введите пароль' },
+                    action: { label: 'Забыли пароль?', action: 'forgot' },
+                },
+                {
+                    name: 'remember', type: 'checkbox', label: 'Запомнить меня на 30 дней',
+                },
+            ],
+            footer: { text: 'Нет аккаунта?', linkText: 'Создать аккаунт', to: 'register' },
+            onSubmit: (values) => auth.login({
+                email: values.email,
+                password: values.password,
+                remember: values.remember,
+            }),
+        },
+
+        register: {
+            eyebrow: 'Новый аккаунт',
+            title: 'Создать аккаунт',
+            subtitle: 'Займёт меньше минуты. Никаких карт и подтверждений.',
+            submit: 'Создать аккаунт',
+            successText: 'Аккаунт создан!',
+            fields: [
+                {
+                    name: 'name', type: 'text', label: 'Имя',
+                    placeholder: 'Как к вам обращаться?', autocomplete: 'name',
+                    icon: 'user',
+                    rules: { required: 'Введите имя', min: 2, minMsg: 'Слишком короткое имя' },
+                },
+                {
+                    name: 'email', type: 'email', label: 'Email',
+                    placeholder: 'you@example.com', autocomplete: 'email',
+                    icon: 'mail', inputmode: 'email',
+                    rules: { required: 'Введите email', email: true },
+                },
+                {
+                    name: 'password', type: 'password', label: 'Пароль',
+                    placeholder: 'Минимум 8 символов', autocomplete: 'new-password',
+                    icon: 'lock', strength: true,
+                    rules: { required: 'Придумайте пароль', min: 8, minMsg: 'Минимум 8 символов' },
+                },
+                {
+                    name: 'passwordConfirm', type: 'password', label: 'Повторите пароль',
+                    placeholder: 'Ещё раз', autocomplete: 'new-password',
+                    icon: 'lock',
+                    rules: {
+                        required: 'Повторите пароль',
+                        match: { field: 'password', msg: 'Пароли не совпадают' },
+                    },
+                },
+                {
+                    name: 'agree', type: 'checkbox',
+                    label: 'Я принимаю условия использования и политику конфиденциальности',
+                    rules: { required: 'Необходимо принять условия' },
+                },
+            ],
+            footer: { text: 'Уже есть аккаунт?', linkText: 'Войти', to: 'login' },
+            onSubmit: (values) => auth.register({
+                name: values.name,
+                email: values.email,
+                password: values.password,
+            }),
+        },
+    };
+}
+</file>
+
+<file path="src/ui/ProfileView.js">
+export class ProfileView extends HTMLElement {
+    #user = null;
+    #auth = null;
+
+    set data({ user, auth }) {
+        this.#user = user;
+        this.#auth = auth;
+        this.#render();
+    }
+
+    #render() {
+        const u = this.#user;
+        this.innerHTML = `
+          <header class="head">
+            <span class="eyebrow">Личный кабинет</span>
+            <h1>Профиль</h1>
+            <p>${u.emailVerified
+                ? 'Email подтверждён'
+                : '<span class="status-warn">Email не подтверждён — некоторые функции недоступны</span>'}</p>
+          </header>
+          <form class="form" id="profile-form">
+            <div class="field">
+              <label>Имя</label>
+              <div class="control"><input name="name" value="${u.name}" /></div>
+            </div>
+            <div class="field">
+              <label>Email</label>
+              <div class="control"><input name="email" type="email" value="${u.email}" /></div>
+            </div>
+            <p class="form-error" data-error></p>
+            <button class="submit" type="submit">Сохранить</button>
+            ${!u.emailVerified
+                ? `<button type="button" class="mini-link" data-resend>Отправить письмо повторно</button>`
+                : ''}
+            <p class="foot"><a href="#/forgot" data-nav>Сменить пароль</a></p>
+          </form>
+        `;
+
+        this.querySelector('#profile-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fd = new FormData(e.target);
+            try {
+                await this.#auth.updateProfile(u.id, {
+                    name: fd.get('name'),
+                    email: fd.get('email'),
+                });
+                this.dispatchEvent(new CustomEvent('profile:updated', {
+                    detail: { user: this.#auth.currentUser },
+                    bubbles: true, composed: true,
+                }));
+            } catch (err) {
+                this.querySelector('[data-error]').textContent = err.message;
+            }
+        });
+
+        this.querySelector('[data-resend]')?.addEventListener('click', async () => {
+            try {
+                await this.#auth.resendVerification();
+                this.querySelector('[data-error]').textContent = 'Письмо отправлено повторно';
+            } catch (err) {
+                this.querySelector('[data-error]').textContent = err.message;
+            }
+        });
+    }
+}
+customElements.define('profile-view', ProfileView);
+</file>
+
+<file path="src/ui/ResetPasswordView.js">
+export class ResetPasswordView extends HTMLElement {
+    #auth = null;
+    #token = null;
+
+    set data({ auth, token }) {
+        this.#auth = auth;
+        this.#token = token;
+        this.#render();
+    }
+
+    #render() {
+        this.innerHTML = `
+          <header class="head">
+            <span class="eyebrow">Новый пароль</span>
+            <h1>Сброс пароля</h1>
+          </header>
+          <form class="form">
+            <div class="field">
+              <label>Новый пароль</label>
+              <div class="control"><input name="password" type="password" required minlength="8" /></div>
+            </div>
+            <div class="field">
+              <label>Повторите пароль</label>
+              <div class="control"><input name="confirm" type="password" required /></div>
+            </div>
+            <p class="form-error" data-error></p>
+            <button class="submit" type="submit">Сохранить пароль</button>
+          </form>
+        `;
+
+        this.querySelector('form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fd = new FormData(e.target);
+            if (fd.get('password') !== fd.get('confirm')) {
+                this.querySelector('[data-error]').textContent = 'Пароли не совпадают';
+                return;
+            }
+            try {
+                await this.#auth.resetPassword(this.#token, fd.get('password'));
+                this.querySelector('[data-error]').textContent = 'Пароль обновлён. Войдите заново.';
+                this.querySelector('[data-error]').classList.add('note');
+                setTimeout(() => { location.hash = '#/login'; }, 1500);
+            } catch (err) {
+                this.querySelector('[data-error]').textContent = err.message;
+            }
+        });
+    }
+}
+customElements.define('reset-password-view', ResetPasswordView);
+</file>
+
+<file path="src/ui/VerifyEmailView.js">
+export class VerifyEmailView extends HTMLElement {
+    #auth = null;
+    #token = null;
+
+    set data({ auth, token }) {
+        this.#auth = auth;
+        this.#token = token;
+        this.#render();
+        this.#verify();
+    }
+
+    #render() {
+        this.innerHTML = `
+          <div class="welcome">
+            <h1>Подтверждение email</h1>
+            <p data-status>Проверяем ссылку…</p>
+            <p class="form-error" data-error></p>
+          </div>
+        `;
+    }
+
+    async #verify() {
+        try {
+            await this.#auth.verifyEmail(this.#token);
+            this.querySelector('[data-status]').textContent = 'Email успешно подтверждён!';
+            setTimeout(() => { location.hash = '#/profile'; }, 1200);
+        } catch (err) {
+            this.querySelector('[data-error]').textContent = err.message;
+        }
+    }
+}
+customElements.define('verify-email-view', VerifyEmailView);
+</file>
+
+<file path="src/ui/WelcomeView.js">
+const escapeHtml = (s) =>
+    String(s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+
+export class WelcomeView extends HTMLElement {
+    #user = null;
+
+    set user(value) {
+        this.#user = value;
+        this.#render();
+    }
+    get user() { return this.#user; }
+
+    #render() {
+        if (!this.#user) return;
+        const name = this.#user.name || this.#user.email;
+        const email = this.#user.email;
+        const initial = String(name).trim()[0]?.toUpperCase() || '?';
+
+        this.innerHTML = `
+      <div class="welcome">
+        <div class="welcome-avatar" aria-hidden="true">${escapeHtml(initial)}</div>
+        <h1>С возвращением, ${escapeHtml(name)}</h1>
+        <p>Вы вошли как ${escapeHtml(email)}</p>
+        <button class="submit" type="button" data-logout>
+          <span class="submit-label">Выйти</span>
+        </button>
+      </div>
+    `;
+
+        this.querySelector('[data-logout]').addEventListener('click', () => {
+            this.dispatchEvent(new CustomEvent('auth:logout', {
+                bubbles: true,
+                composed: true,
+            }));
+        });
+    }
+}
+
+customElements.define('welcome-view', WelcomeView);
+</file>
+
+<file path="src/utils/id.js">
+export function uuid() {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+</file>
+
+<file path="src/utils/password.js">
+const enc = new TextEncoder();
+const toHex = (buf) =>
+    [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+const fromHex = (hex) =>
+    new Uint8Array(hex.match(/.{2}/g).map((b) => parseInt(b, 16)));
+
+const derive = async (password, salt) => {
+    const key = await crypto.subtle.importKey(
+        'raw', enc.encode(password), 'PBKDF2', false, ['deriveBits'],
+    );
+    return crypto.subtle.deriveBits(
+        { name: 'PBKDF2', salt, iterations: 100_000, hash: 'SHA-256' },
+        key, 256,
+    );
+};
+
+export async function hashPassword(password) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const bits = await derive(password, salt);
+    return `${toHex(salt)}:${toHex(bits)}`;
+}
+
+export async function verifyPassword(password, stored) {
+    const [saltHex, hashHex] = stored.split(':');
+    const bits = await derive(password, fromHex(saltHex));
+    const computed = toHex(bits);
+    if (computed.length !== hashHex.length) return false;
+    let diff = 0;
+    for (let i = 0; i < computed.length; i++) {
+        diff |= computed.charCodeAt(i) ^ hashHex.charCodeAt(i);
+    }
+    return diff === 0;
+}
+</file>
+
+<file path="src/utils/validation.js">
+export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+export function validateField(field, value, allValues) {
+    const rules = field.rules || {};
+
+    if (field.type === 'checkbox') {
+        return rules.required && !value ? rules.required : '';
+    }
+
+    const v = String(value ?? '').trim();
+
+    if (!v) return rules.required || '';
+    if (rules.min && v.length < rules.min) return rules.minMsg || `Минимум ${rules.min} символов`;
+    if (rules.email && !EMAIL_RE.test(v)) return 'Некорректный email';
+
+    if (rules.match) {
+        const other = String(allValues[rules.match.field] ?? '');
+        if (v !== other) return rules.match.msg || 'Значения не совпадают';
+    }
+
+    return '';
+}
+</file>
+
+<file path="src/main.js">
+import { VerificationRepository } from './repos/VerificationRepository.js';
+import { PasswordResetRepository } from './repos/PasswordResetRepository.js';
+import { EmailService } from './services/EmailService.js';
+import './ui/ProfileView.js';
+import './ui/ForgotPasswordView.js';
+import './ui/ResetPasswordView.js';
+import './ui/VerifyEmailView.js';
+
+const emailService = new EmailService();
+
+const auth = new AuthService({
+    userRepo: new UserRepository(db),
+    sessionRepo: new SessionRepository(db),
+    verificationRepo: new VerificationRepository(db),
+    passwordResetRepo: new PasswordResetRepository(db),
+    emailService,
+});
+
+// ---- парсинг маршрута с query ----
+function parseRoute() {
+    const raw = location.hash.replace(/^#\/?/, '');
+    const [path, query = ''] = raw.split('?');
+    return { path: path || 'login', params: new URLSearchParams(query) };
+}
+
+function renderProfile() {
+    const u = auth.currentUser;
+    if (!u) return mountLogin('login');
+    view.innerHTML = '';
+    const el = document.createElement('profile-view');
+    el.data = { user: u, auth };
+    view.appendChild(el);
+    restartAnim();
+}
+
+function renderSimple(tag, props) {
+    view.innerHTML = '';
+    const el = document.createElement(tag);
+    if (props) Object.assign(el, props);
+    view.appendChild(el);
+    restartAnim();
+}
+
+function route() {
+    const { path, params } = parseRoute();
+
+    switch (path) {
+        case 'profile':
+            renderProfile();
+            break;
+        case 'forgot':
+            renderSimple('forgot-password-view', { auth });
+            break;
+        case 'reset-password':
+            renderSimple('reset-password-view', { data: { auth, token: params.get('token') } });
+            break;
+        case 'verify':
+            renderSimple('verify-email-view', { data: { auth, token: params.get('token') } });
+            break;
+        case 'register':
+        case 'login':
+        default:
+            if (auth.currentUser) renderProfile();
+            else mountLogin(path === 'register' ? 'register' : 'login');
+    }
+}
+
+window.addEventListener('hashchange', route);
+
+document.addEventListener('auth:success', () => {
+    location.hash = '#/profile';
+});
+
+document.addEventListener('profile:updated', () => {
+    renderProfile();
+});
+
+// bootstrap
+(async () => {
+    const restored = await auth.restoreSession();
+    if (restored) location.hash = '#/profile';
+    else route();
+})();
+</file>
+
+<file path="styles/main.css">
+/* ============================================================
+   ТОКЕНЫ
+   ============================================================ */
+:root {
+    --bg: #06080f;
+    --text: #e8ecf7;
+    --muted: #8b93ab;
+    --dim: #5f6780;
+
+    --border: rgba(255, 255, 255, .09);
+    --border-strong: rgba(255, 255, 255, .18);
+
+    --field: rgba(255, 255, 255, .045);
+    --field-hover: rgba(255, 255, 255, .07);
+
+    --accent: #7c5cff;
+    --accent-2: #22d3ee;
+    --danger: #ff6b81;
+    --ok: #34d399;
+
+    --radius: 14px;
+    --ease: cubic-bezier(.2, .8, .2, 1);
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box
+}
+
+html {
+    height: 100%
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    min-height: 100dvh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+a {
+    color: inherit
+}
+
+/* ---------- фон ---------- */
+.bg {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    overflow: hidden;
+    background:
+        radial-gradient(1200px 620px at 82% -12%, rgba(124, 92, 255, .20), transparent 62%),
+        radial-gradient(900px 520px at -5% 105%, rgba(34, 211, 238, .14), transparent 62%),
+        #06080f;
+}
+
+.blob {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(110px);
+    opacity: .5;
+    will-change: transform;
+    animation: float 20s ease-in-out infinite;
+}
+
+.b1 {
+    width: 540px;
+    height: 540px;
+    background: #7c5cff;
+    top: -200px;
+    right: -140px
+}
+
+.b2 {
+    width: 480px;
+    height: 480px;
+    background: #22d3ee;
+    bottom: -220px;
+    left: -160px;
+    animation-delay: -7s
+}
+
+.b3 {
+    width: 340px;
+    height: 340px;
+    background: #ff5c8a;
+    top: 42%;
+    left: 46%;
+    opacity: .22;
+    animation-delay: -13s
+}
+
+@keyframes float {
+
+    0%,
+    100% {
+        transform: translate3d(0, 0, 0) scale(1)
+    }
+
+    50% {
+        transform: translate3d(34px, -34px, 0) scale(1.09)
+    }
+}
+
+/* ---------- каркас ---------- */
+.app {
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: center;
+    justify-items: center;
+    padding: 28px 18px calc(28px + env(safe-area-inset-bottom));
+}
+
+@media (min-width:1000px) {
+    .app {
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr);
+        align-items: stretch;
+        justify-items: stretch;
+        padding: 0;
+    }
+}
+
+/* ---------- бренд ---------- */
+.brand {
+    display: none;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 40px;
+    padding: 56px 60px;
+    border-right: 1px solid var(--border);
+    background: linear-gradient(160deg, rgba(124, 92, 255, .10), transparent 55%);
+    position: relative;
+    overflow: hidden;
+}
+
+@media (min-width:1000px) {
+    .brand {
+        display: flex
+    }
+}
+
+.brand::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(600px 400px at 20% 10%, rgba(34, 211, 238, .10), transparent 70%);
+}
+
+.brand-logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: relative;
+    z-index: 1;
+}
+
+.logo-mark {
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+    display: grid;
+    place-items: center;
+    flex: none;
+    background: linear-gradient(135deg, #7c5cff, #4f7cff 55%, #22d3ee);
+    box-shadow: 0 10px 26px -10px rgba(124, 92, 255, .95);
+}
+
+.logo-text {
+    font-weight: 700;
+    font-size: 17px;
+    letter-spacing: -.015em
+}
+
+.brand-body {
+    position: relative;
+    z-index: 1;
+    max-width: 420px
+}
+
+.brand-body h2 {
+    margin: 0 0 14px;
+    font-size: clamp(26px, 2.6vw, 36px);
+    line-height: 1.18;
+    letter-spacing: -.025em;
+    font-weight: 700;
+}
+
+.grad {
+    background: linear-gradient(100deg, #a78bfa, #22d3ee);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+.brand-body>p {
+    margin: 0 0 26px;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1.65
+}
+
+.features {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.features li {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 14.5px;
+    color: #b9c0d4
+}
+
+.tick {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    flex: none;
+    background: rgba(52, 211, 153, .14);
+    border: 1px solid rgba(52, 211, 153, .35);
+    color: #6ee7b7;
+}
+
+.brand-foot {
+    position: relative;
+    z-index: 1;
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--dim)
+}
+
+/* ---------- панель / карточка ---------- */
+.panel {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 0;
+}
+
+@media (min-width:1000px) {
+    .panel {
+        padding: 56px 48px
+    }
+}
+
+.panel-inner {
+    width: 100%;
+    max-width: 440px
+}
+
+.mobile-brand {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    margin-bottom: 22px;
+    justify-content: center;
+}
+
+@media (min-width:1000px) {
+    .mobile-brand {
+        display: none
+    }
+}
+
+.card {
+    width: 100%;
+    border-radius: 24px;
+    padding: 30px 24px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, .055), rgba(255, 255, 255, .018));
+    border: 1px solid var(--border);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    backdrop-filter: blur(20px) saturate(150%);
+    box-shadow:
+        0 36px 90px -36px rgba(0, 0, 0, .95),
+        inset 0 1px 0 rgba(255, 255, 255, .07);
+}
+
+@media (min-width:480px) {
+    .card {
+        padding: 38px 34px
+    }
+}
+
+.legal {
+    margin: 18px 0 0;
+    text-align: center;
+    font-size: 12px;
+    color: var(--dim);
+    line-height: 1.6;
+}
+
+.legal a {
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 1px solid rgba(139, 147, 171, .35);
+    transition: color .18s, border-color .18s;
+}
+
+.legal a:hover {
+    color: var(--text);
+    border-bottom-color: var(--border-strong)
+}
+
+/* ---------- анимации ---------- */
+@keyframes cardIn {
+    from {
+        opacity: 0;
+        transform: translateY(14px) scale(.985);
+        filter: blur(5px)
+    }
+
+    to {
+        opacity: 1;
+        transform: none;
+        filter: none
+    }
+}
+
+@keyframes rise {
+    from {
+        opacity: 0;
+        transform: translateY(10px)
+    }
+
+    to {
+        opacity: 1;
+        transform: none
+    }
+}
+
+.card.anim {
+    animation: cardIn .45s var(--ease) both
+}
+
+.card.anim .field {
+    animation: rise .5s var(--ease) both
+}
+
+.card.anim .field:nth-of-type(1) {
+    animation-delay: .05s
+}
+
+.card.anim .field:nth-of-type(2) {
+    animation-delay: .10s
+}
+
+.card.anim .field:nth-of-type(3) {
+    animation-delay: .15s
+}
+
+.card.anim .field:nth-of-type(4) {
+    animation-delay: .20s
+}
+
+.card.anim .field:nth-of-type(5) {
+    animation-delay: .25s
+}
+
+.card.anim .submit,
+.card.anim .foot {
+    animation: rise .5s var(--ease) both;
+    animation-delay: .24s
+}
+
+/* ---------- заголовок формы ---------- */
+.head .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    padding: 5px 11px;
+    border-radius: 99px;
+    border: 1px solid rgba(124, 92, 255, .38);
+    background: rgba(124, 92, 255, .13);
+    color: #b9a8ff;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+}
+
+.head h1 {
+    margin: 14px 0 8px;
+    font-size: clamp(23px, 3.4vw, 29px);
+    line-height: 1.2;
+    letter-spacing: -.025em;
+    font-weight: 700;
+}
+
+.head>p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14.5px;
+    line-height: 1.55
+}
+
+/* ---------- форма ---------- */
+.form {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-top: 26px
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0
+}
+
+.field-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px
+}
+
+.field label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: .005em
+}
+
+.mini-link {
+    font-size: 12.5px;
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: color .18s, border-color .18s;
+    background: none;
+    border-top: 0;
+    border-left: 0;
+    border-right: 0;
+    padding: 0;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.mini-link:hover {
+    color: #b9a8ff;
+    border-bottom-color: rgba(185, 168, 255, .45)
+}
+
+.control {
+    position: relative;
+    display: flex;
+    align-items: center
+}
+
+.control input {
+    width: 100%;
+    height: 52px;
+    padding: 0 16px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--field);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 15px;
+    outline: none;
+    transition: border-color .18s, box-shadow .18s, background .18s;
+}
+
+.control.has-icon input {
+    padding-left: 44px
+}
+
+.control:has(.toggle) input {
+    padding-right: 46px
+}
+
+.control input::placeholder {
+    color: #5b6379
+}
+
+.control input:hover {
+    border-color: rgba(255, 255, 255, .14)
+}
+
+.control input:focus {
+    background: var(--field-hover);
+    border-color: rgba(124, 92, 255, .8);
+    box-shadow: 0 0 0 4px rgba(124, 92, 255, .16);
+}
+
+.control input:-webkit-autofill,
+.control input:-webkit-autofill:hover,
+.control input:-webkit-autofill:focus {
+    -webkit-text-fill-color: var(--text);
+    -webkit-box-shadow: 0 0 0 60px #12162a inset;
+    caret-color: var(--text);
+}
+
+.icon {
+    position: absolute;
+    left: 15px;
+    display: grid;
+    place-items: center;
+    color: #6b7391;
+    pointer-events: none;
+    transition: color .18s;
+}
+
+.control:focus-within .icon {
+    color: #a48dff
+}
+
+.toggle {
+    position: absolute;
+    right: 6px;
+    width: 36px;
+    height: 36px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: #6b7391;
+    cursor: pointer;
+    transition: color .18s, background .18s;
+}
+
+.toggle:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, .06)
+}
+
+.toggle:focus-visible {
+    outline: 2px solid rgba(124, 92, 255, .8);
+    outline-offset: 1px
+}
+
+/* ---------- ошибки ---------- */
+.error {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--danger);
+    line-height: 1.4
+}
+
+.error:empty {
+    display: none
+}
+
+.field.is-invalid .control input {
+    border-color: rgba(255, 107, 129, .6)
+}
+
+.field.is-invalid .control input:focus {
+    box-shadow: 0 0 0 4px rgba(255, 107, 129, .16)
+}
+
+.field.is-invalid .icon {
+    color: #ff8b9c
+}
+
+/* ---------- чекбокс ---------- */
+.field--check {
+    gap: 6px
+}
+
+.checkbox {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    cursor: pointer;
+    font-size: 13.5px;
+    color: var(--muted);
+    user-select: none;
+    line-height: 1.45;
+}
+
+.checkbox input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none
+}
+
+.checkbox .box {
+    width: 19px;
+    height: 19px;
+    flex: none;
+    border-radius: 6px;
+    border: 1.5px solid var(--border-strong);
+    background: rgba(255, 255, 255, .04);
+    display: grid;
+    place-items: center;
+    transition: background .18s, border-color .18s, transform .12s;
+}
+
+.checkbox .box svg {
+    opacity: 0;
+    transform: scale(.55);
+    transition: opacity .18s, transform .18s
+}
+
+.checkbox:hover .box {
+    border-color: rgba(255, 255, 255, .32)
+}
+
+.checkbox input:checked+.box {
+    background: linear-gradient(135deg, #7c5cff, #22d3ee);
+    border-color: transparent;
+}
+
+.checkbox input:checked+.box svg {
+    opacity: 1;
+    transform: scale(1)
+}
+
+.checkbox input:focus-visible+.box {
+    box-shadow: 0 0 0 4px rgba(124, 92, 255, .28)
+}
+
+.field--check.is-invalid .box {
+    border-color: rgba(255, 107, 129, .7)
+}
+
+/* ---------- индикатор пароля ---------- */
+.strength {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+    margin-top: 2px
+}
+
+.strength i {
+    height: 4px;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, .1);
+    transition: background .25s
+}
+
+.strength[data-level="1"] i:nth-child(-n+1) {
+    background: #ff6b81
+}
+
+.strength[data-level="2"] i:nth-child(-n+2) {
+    background: #ffb020
+}
+
+.strength[data-level="3"] i:nth-child(-n+3) {
+    background: #4f9bff
+}
+
+.strength[data-level="4"] i:nth-child(-n+4) {
+    background: #34d399
+}
+
+.strength-label {
+    margin: 0;
+    font-size: 12px;
+    color: var(--muted)
+}
+
+.strength-label:empty {
+    display: none
+}
+
+/* ---------- кнопка ---------- */
+.submit {
+    position: relative;
+    margin-top: 6px;
+    height: 52px;
+    width: 100%;
+    border: 0;
+    border-radius: var(--radius);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    font-family: inherit;
+    font-size: 15.5px;
+    font-weight: 600;
+    letter-spacing: .01em;
+    color: #fff;
+    cursor: pointer;
+    background: linear-gradient(135deg, #7c5cff, #4f7cff 55%, #22d3ee);
+    background-size: 150% 150%;
+    box-shadow: 0 16px 34px -14px rgba(124, 92, 255, .9);
+    transition: transform .15s var(--ease), box-shadow .25s, filter .2s, background-position .5s;
+}
+
+.submit:hover:not(:disabled) {
+    transform: translateY(-1px);
+    background-position: 100% 0;
+    box-shadow: 0 20px 40px -14px rgba(124, 92, 255, 1);
+}
+
+.submit:active:not(:disabled) {
+    transform: translateY(0) scale(.996)
+}
+
+.submit:focus-visible {
+    outline: 2px solid #b9a8ff;
+    outline-offset: 3px
+}
+
+.submit:disabled {
+    opacity: .8;
+    cursor: progress;
+    transform: none
+}
+
+.spinner {
+    display: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, .32);
+    border-top-color: #fff;
+    animation: spin .7s linear infinite;
+}
+
+.submit.is-loading .spinner {
+    display: block
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg)
+    }
+}
+
+/* ---------- сервисные сообщения ---------- */
+.form-error,
+.note {
+    display: none;
+    margin: 0;
+    padding: 11px 13px;
+    border-radius: 11px;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.form-error.show,
+.note.show {
+    display: block;
+    animation: rise .3s var(--ease) both
+}
+
+.form-error {
+    background: rgba(255, 107, 129, .11);
+    border: 1px solid rgba(255, 107, 129, .32);
+    color: #ffb3bf;
+}
+
+.note {
+    background: rgba(52, 211, 153, .1);
+    border: 1px solid rgba(52, 211, 153, .3);
+    color: #7cf0c0;
+}
+
+/* ---------- футер формы ---------- */
+.foot {
+    margin: 4px 0 0;
+    text-align: center;
+    font-size: 13.5px;
+    color: var(--muted)
+}
+
+.foot a {
+    color: #b9a8ff;
+    font-weight: 600;
+    text-decoration: none;
+    border-bottom: 1px solid rgba(185, 168, 255, .4);
+    transition: color .18s, border-color .18s;
+}
+
+.foot a:hover {
+    color: #d5caff;
+    border-bottom-color: rgba(213, 202, 255, .8)
+}
+
+/* ============================================================
+     WELCOME VIEW (после успешного входа)
+     ============================================================ */
+.welcome {
+    text-align: center;
+    padding: 12px 0 8px
+}
+
+.welcome-avatar {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    margin: 0 auto 18px;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(135deg, #7c5cff, #22d3ee);
+    color: #fff;
+    font-size: 28px;
+    font-weight: 700;
+    box-shadow: 0 16px 40px -14px rgba(124, 92, 255, .9);
+}
+
+.welcome h1 {
+    margin: 8px 0 6px;
+    font-size: clamp(22px, 3vw, 26px);
+    letter-spacing: -.02em;
+}
+
+.welcome p {
+    margin: 0 0 22px;
+    color: var(--muted);
+    font-size: 14.5px
+}
+
+.welcome .submit {
+    max-width: 240px;
+    margin: 8px auto 0
+}
+
+/* ============================================================
+     ДОСТУПНОСТЬ
+     ============================================================ */
+:focus-visible {
+    outline: 2px solid rgba(124, 92, 255, .85);
+    outline-offset: 2px
+}
+
+@media (prefers-reduced-motion:reduce) {
+
+    *,
+    *::before,
+    *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .001ms !important;
+    }
+}
+
+.status-warn { color: var(--danger); font-weight: 500; }
+.form-error.note { background: rgba(52,211,153,.1); border-color: rgba(52,211,153,.3); color: #7cf0c0; }
+</file>
+
+<file path="tests/services/AuthService.test.js">
+
+</file>
+
+<file path="index.html">
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>Aurora — Вход</title>
+  <link rel="stylesheet" href="styles/main.css" />
+</head>
+<body>
+  <div class="bg" aria-hidden="true">
+    <span class="blob b1"></span>
+    <span class="blob b2"></span>
+    <span class="blob b3"></span>
+  </div>
+
+  <div class="app">
+    <aside class="brand">
+      <div class="brand-logo">
+        <span class="logo-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+               stroke="#fff" stroke-width="2" stroke-linejoin="round">
+            <path d="M12 3l2.4 6.2L20.6 12l-6.2 2.4L12 21l-2.4-6.6L3.4 12l6.2-2.8L12 3z"/>
+          </svg>
+        </span>
+        <span class="logo-text">Aurora</span>
+      </div>
+
+      <div class="brand-body">
+        <h2>Всё ваше <span class="grad">в одном месте</span></h2>
+        <p>Единый аккаунт для проектов, команды и&nbsp;инструментов. Начните работу за&nbsp;пару секунд.</p>
+        <ul class="features">
+          <li><span class="tick">✓</span> Безопасная аутентификация</li>
+          <li><span class="tick">✓</span> Синхронизация между устройствами</li>
+          <li><span class="tick">✓</span> Никакого спама — только по делу</li>
+        </ul>
+      </div>
+
+      <p class="brand-foot">© 2025 Aurora — демонстрационный интерфейс</p>
+    </aside>
+
+    <main class="panel">
+      <div class="panel-inner">
+        <div class="mobile-brand">
+          <span class="logo-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+                 stroke="#fff" stroke-width="2" stroke-linejoin="round">
+              <path d="M12 3l2.4 6.2L20.6 12l-6.2 2.4L12 21l-2.4-6.6L3.4 12l6.2-2.8L12 3z"/>
+            </svg>
+          </span>
+          <span class="logo-text">Aurora</span>
+        </div>
+
+        <div class="card" id="view"></div>
+
+        <p class="legal">
+          Продолжая, вы соглашаетесь с <a href="#">условиями использования</a><br />
+          и <a href="#">политикой конфиденциальности</a>.
+        </p>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+  <script type="module" src="src/main.js"></script>
+  <!-- EmailJS SDK (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+</body>
+</html>
+</file>
+
+<file path="package.json">
+{
+  "dependencies": {
+    "repomix": "^1.18.1"
+  }
+}
+</file>
+
+</files>
