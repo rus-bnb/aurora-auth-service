@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark" />
   <link rel="icon" href="data:," />
   <title>Aurora — Вход</title>
-  <link rel="stylesheet" href="styles/main.css" />
+  <link rel="stylesheet" href="/styles/main.css" />
 </head>
 <body>
   <div class="bg" aria-hidden="true">
@@ -62,9 +62,9 @@
     </main>
   </div>
 
-  <!-- EmailJS SDK — ДО main.js, чтобы window.emailjs был доступен при первом вызове -->
+  <!-- SDK — ДО main.js -->
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
-  <!-- Точка входа — единожды -->
-  <script type="module" src="src/main.js"></script>
+  <!-- точка входа -->
+  <script type="module" src="/src/main.js"></script>
 </body>
 </html>
