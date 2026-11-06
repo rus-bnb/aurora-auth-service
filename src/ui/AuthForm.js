@@ -1,5 +1,5 @@
 import { ICONS } from './icons.js';
-import { validateField, EMAIL_RE } from '../utils/validation.js';
+import { validateField } from '../utils/validation.js';
 
 const STRENGTH_LABELS = ['', 'Слабый', 'Средний', 'Хороший', 'Надёжный'];
 
@@ -245,20 +245,16 @@ export class AuthForm extends HTMLElement {
     }
 
     #runAction(action) {
-        if (action === 'forgot') {
-            const emailInput = this.querySelector('input[name="email"]');
-            const email = emailInput?.value.trim() ?? '';
+    if (action === 'forgot') {
+            const email = this.querySelector('input[name="email"]')?.value.trim() || '';
 
-            if (!EMAIL_RE.test(email)) {
-                this.#formError('Укажите email');
-                emailInput?.focus();
-                return;
-            }
-
-            this.#formError('');
-            this.#setNote('Локальная демо-версия не поддерживает восстановление пароля.');
-        }
+        this.dispatchEvent(new CustomEvent('navigate', {
+            detail: { to: 'forgot', prefill: { email } },
+            bubbles: true,
+            composed: true,
+        }));
     }
+}
 
     async #onSubmit(e) {
         e.preventDefault();

@@ -184,6 +184,10 @@ export class AuthService {
     }
 
     async resetPassword(token, newPassword) {
+        if (!newPassword || newPassword.length < 8) {
+            throw new AuthError('Пароль должен быть не короче 8 символов');
+        }
+
         const record = await this.#passwordResetRepo.findById(token);
         if (!record) throw new AuthError('Ссылка недействительна или истекла');
         if (record.expiresAt < Date.now()) {

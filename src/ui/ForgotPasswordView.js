@@ -1,9 +1,15 @@
 export class ForgotPasswordView extends HTMLElement {
-    #auth = null;
-    set auth(value) { this.#auth = value; this.#render(); }
+  #auth = null;
 
-    #render() {
-        this.innerHTML = `
+  set auth(value) { this.#auth = value; this.#render(); }
+
+  set prefill(value) {
+    const input = this.querySelector('input[name="email"]');
+    if (input && value) input.value = value;
+  }
+
+  #render() {
+    this.innerHTML = `
           <header class="head">
             <span class="eyebrow">Восстановление</span>
             <h1>Сброс пароля</h1>
@@ -20,18 +26,22 @@ export class ForgotPasswordView extends HTMLElement {
           </form>
         `;
 
-        this.querySelector('form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const email = new FormData(e.target).get('email');
-            try {
-                await this.#auth.requestPasswordReset(email);
-                this.querySelector('[data-error]').textContent =
-                    'Если аккаунт существует и подтверждён, письмо отправлено.';
-                this.querySelector('[data-error]').classList.add('note');
-            } catch (err) {
-                this.querySelector('[data-error]').textContent = err.message;
-            }
-        });
-    }
+    this.querySelector('form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errEl = this.querySelector('[data-error]');
+      const email = new FormData(e.target).get('email');
+      try {
+        await this.#auth.requestPasswordReset(email);
+        this.querySelector('[data-error]').textContent =
+          'Если аккаунт существует и подтверждён, письмо отправлено.';
+        errEl.classList.remove('form-error');
+        errEl.classList.add('note', 'show');
+      } catch (err) {
+        errEl.textContent = err.message;
+          errEl.classList.add('show');
+      }
+
+    });
+  }
 }
 customElements.define('forgot-password-view', ForgotPasswordView);

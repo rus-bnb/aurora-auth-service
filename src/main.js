@@ -85,9 +85,19 @@ function route() {
             renderProfile();
             break;
 
-        case 'forgot':
-            renderSimple('forgot-password-view', { auth }, 'Восстановление пароля');
+        case 'forgot': {
+            const prefill = pendingPrefill?.email || '';
+            pendingPrefill = null;
+
+            document.title = 'Восстановление пароля — Aurora';
+            view.innerHTML = '';
+            const el = document.createElement('forgot-password-view');
+            el.auth = auth;
+            el.prefill = prefill;
+            view.appendChild(el);
+            restartAnim();
             break;
+        }
 
         case 'reset-password':
             renderSimple(
@@ -127,6 +137,17 @@ document.addEventListener('auth:logout', async () => {
 
 document.addEventListener('profile:updated', () => {
     renderProfile();
+});
+
+let pendingPrefill = null;
+
+// ---- 4. Glue events -----------------------------------------------------
+document.addEventListener('navigate', (e) => {
+    const to = e.detail?.to;
+    if (!to) return;
+    const next = `#/${to}`;
+    if (location.hash === next) route();
+    else location.hash = next;
 });
 
 // ---- 5. Bootstrap -------------------------------------------------------
